@@ -1,7 +1,7 @@
 Package: pavian
 Type: Package
 Title: Visualize and analyze metagenomics classification results
-Version: 1.2.1
+Version: 1.2.2
 URL: https://github.com/fbreitwieser/pavian
 BugReports: https://github.com/fbreitwieser/pavian/issues
 Authors@R: person("Florian P", "Breitwieser", email = "fpbreitwieser@gmail.com", role = c("aut", "cre"))
@@ -15,7 +15,11 @@ Suggests:
     BiocManager,
     Rsamtools,
     knitr,
-    testthat
+    testthat,
+    ggplot2,
+    reshape2,
+    scales,
+    pheatmap
 Remotes: github::fbreitwieser/sankeyD3,
         github::fbreitwieser/shinyFileTree
 License: GPL-3

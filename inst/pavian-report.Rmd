@@ -5,14 +5,9 @@ output:
     style: "yeti"
     toc: true 
     toc_float: true
-#    logo: logo.png
-#    favicon: favicon.png
-#    css: custom.css
-#  flexdashboard::flex_dashboard:
-#    vertical_layout: scroll
 params:
-  doc_title: "Example report on metagenomics classification results"
-  doc_author: !r paste("generated with Pavian v",utils::packageVersion("pavian"))
+  doc_title: "Pavian metagenomics classification report"
+  doc_author: !r paste("generated with Pavian v", utils::packageVersion("pavian"))
   doc_date: !r date()
   set_name: "example_data"
   all_data_loaded: FALSE
@@ -32,207 +27,420 @@ date: "`r params$doc_date`"
 library(pavian)
 library(shiny)
 library(DT)
-knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 options(DT.options = list(pageLength = 15,
                           saveState = TRUE,
                           searchHighlight = TRUE,
                           scrollX = TRUE,
                           colReorder = TRUE,
-                          #deferRender = FALSE,
-                          #scrollY = 400,
-                          #scroller = TRUE,
-                          #dom = 'Bfrtip',
                           selection = 'single',
                           dom = 'Bfrtip',
                           class = "stripe hover row-border compact",
-                          lengthMenu = list(c(15, 25, 50, 100), c('15', '25', '50', '100')),
+                          lengthMenu = list(c(15, 25, 50, 100), c('15','25','50','100')),
                           search = list(regex = TRUE, caseInsensitive = TRUE)))
-
 set_name <- params$set_name
 ```
 
 Sample set summary
 =====================================  
 
-```{r sample_summary, message=FALSE}
+```{r load_data}
 if (isTRUE(params$all_data_loaded)) {
   sample_data <- params$sample_data
-  reports <- params$reports
+  reports     <- params$reports
 } else {
-  sample_directory <- system.file("shinyapp","example-data","brain-biopsies",package="pavian")
+  sample_directory <- system.file("shinyapp","example-data","brain-biopsies", package = "pavian")
   sample_data <- pavian::read_sample_data(sample_directory)
-  reports <- pavian::read_reports(sample_data$ReportFilePath, sample_data$Name)
+  reports     <- pavian::read_reports(sample_data$ReportFilePath, sample_data$Name)
 }
 
 samples_summary <- pavian::summarize_reports(reports)
 samples_summary$Name <- rownames(samples_summary)
 extra_cols <- c("Name")
-samples_summary <- samples_summary[,c(extra_cols, setdiff(colnames(samples_summary),extra_cols))]
+samples_summary <- samples_summary[, c(extra_cols, setdiff(colnames(samples_summary), extra_cols))]
 colnames(samples_summary) <- pavian:::beautify_string(colnames(samples_summary))
+```
 
+## Run information
+
+```{r run_info, results='asis'}
+total_reads <- tryCatch(sum(samples_summary[, 2], na.rm = TRUE), error = function(e) NA)
+cat(sprintf("
+| | |
+|---|---|
+| **Sample set** | %s |
+| **Number of samples** | %d |
+| **Total reads (across samples)** | %s |
+| **Filtered taxa (Sankey)** | %s |
+| **Generated** | %s |
+| **Pavian version** | %s |
+",
+  params$set_name,
+  length(reports),
+  ifelse(is.na(total_reads), "NA", format(total_reads, big.mark = ",")),
+  ifelse(length(params$filter_taxa) == 0 || all(is.na(params$filter_taxa)),
+         "Chordata, other sequences (default)",
+         paste(params$filter_taxa, collapse = ", ")),
+  format(Sys.time(), "%Y-%m-%d %H:%M %Z"),
+  as.character(utils::packageVersion("pavian"))
+))
+```
+
+## Tables
+
+```{r sample_summary}
 start_color_bar_at <- 3
 samples_summary_percent <- samples_summary
-samples_summary_percent[, start_color_bar_at:ncol(samples_summary)] <- 100 * signif(sweep(samples_summary[, start_color_bar_at:ncol(samples_summary)], 1, samples_summary[, 2], `/`), 4)
+samples_summary_percent[, start_color_bar_at:ncol(samples_summary)] <-
+  100 * signif(sweep(samples_summary[, start_color_bar_at:ncol(samples_summary)],
+                     1, samples_summary[, 2], `/`), 4)
 
 tabsetPanel(
-    tabPanel("Classification summary",
-           DT::datatable(samples_summary_percent,   
-                         rownames = FALSE,
-              class = "stripe hover row-border compact",
-              extensions = 'Buttons', 
-              options = list( dom = 'Bfrtip', buttons = pavian:::common_buttons(set_name))) %>% pavian:::formatSummaryDT(display_percent = TRUE)
-  ), 
+  tabPanel("Classification summary (%)",
+    DT::datatable(samples_summary_percent, rownames = FALSE,
+                  class = "stripe hover row-border compact",
+                  extensions = 'Buttons',
+                  options = list(dom = 'Bfrtip',
+                                 buttons = pavian:::common_buttons(set_name))) %>%
+      pavian:::formatSummaryDT(display_percent = TRUE)),
   tabPanel("Raw read numbers",
-    DT::datatable(samples_summary,  
-                  rownames = FALSE,
-                class = "stripe hover row-border compact",
-                extensions = 'Buttons', 
-                options = list( dom = 'Bfrtip', buttons = pavian:::common_buttons(set_name))) %>% pavian:::formatSummaryDT(display_percent = FALSE)
-  ),
+    DT::datatable(samples_summary, rownames = FALSE,
+                  class = "stripe hover row-border compact",
+                  extensions = 'Buttons',
+                  options = list(dom = 'Bfrtip',
+                                 buttons = pavian:::common_buttons(set_name))) %>%
+      pavian:::formatSummaryDT(display_percent = FALSE)),
   tabPanel("Sample information",
-           DT::datatable(sample_data,   
-              class = "stripe hover row-border compact nowrap",
-              extensions = 'Buttons', 
-              options = list( dom = 'Bfrtip', buttons = pavian:::common_buttons(set_name))))
+    DT::datatable(sample_data,
+                  class = "stripe hover row-border compact nowrap",
+                  extensions = 'Buttons',
+                  options = list(dom = 'Bfrtip',
+                                 buttons = pavian:::common_buttons(set_name))))
 )
+```
+
+## Read-fate overview
+
+```{r qc_plot, fig.width=9, fig.height=4.5}
+tryCatch({
+  library(ggplot2)
+  cols_present <- colnames(samples_summary)
+  pick <- function(re) cols_present[grep(re, cols_present, ignore.case = TRUE)][1]
+
+  qc <- data.frame(
+    Sample       = rownames(samples_summary),
+    Unclassified = samples_summary[, pick("unclassified")],
+    Chordate     = samples_summary[, pick("chordate")],
+    Microbial    = samples_summary[, pick("microbial")],
+    stringsAsFactors = FALSE
+  )
+  qc_long <- reshape2::melt(qc, id.vars = "Sample",
+                            variable.name = "Category", value.name = "Reads")
+  qc_long$Category <- factor(qc_long$Category,
+                             levels = c("Unclassified","Chordate","Microbial"))
+  ggplot(qc_long, aes(Sample, Reads, fill = Category)) +
+    geom_col(position = "fill") +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    scale_fill_manual(values = c("Unclassified" = "#b0b0b0",
+                                 "Chordate"     = "#f4a261",
+                                 "Microbial"    = "#2a9d8f")) +
+    labs(y = "Fraction of reads", x = NULL, fill = NULL,
+         title = "Read fate per sample") +
+    theme_minimal(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title  = element_text(face = "bold"))
+}, error = function(e) {
+  cat("*(Could not render QC plot:", conditionMessage(e), ")*")
+})
 ```
 
 Classification results
 =====================================  
 
-```{r classifications, message = TRUE, warning=TRUE, eval=TRUE}
-## Classificationas across samples
+```{r classifications}
 merged_reports <- pavian::merge_reports2(reports, col_names = sample_data$Name)
 taxonReads <- merged_reports$taxonReads
 cladeReads <- merged_reports$cladeReads
-tax_data <- merged_reports[["tax_data"]]
-numericCols <- c("taxonReads","cladeReads", "taxonReads %","cladeReads %","taxonReads z-score","cladeReads z-score")
-numericCols <- c("taxonReads","cladeReads")
-stat_columns <- c("Mean", "Median", "Max", "Min", "Sd", "Maximum absolute deviation", "Max Z-score")
-stat_columns <- c("Mean")
-shown_rows <- seq_len(nrow(tax_data))
+tax_data   <- merged_reports[["tax_data"]]
 
-sel_bacteria = grepl("d_Bacteria",tax_data[,"taxLineage"]) & tax_data[,"taxRank"] == 'S'
-sel_viruses = grepl("d_Viruses",tax_data[,"taxLineage"])  & tax_data[,"taxRank"] == 'S'
-sel_fungi = grepl("k_Fungi",tax_data[,"taxLineage"])  & tax_data[,"taxRank"] == 'S'
-sel_euk = grepl("d_Eukaryota",tax_data[,"taxLineage"]) & tax_data[,"taxRank"] == 'S'
-sel_protists = grepl("d_Eukaryota",tax_data[,"taxLineage"]) & !sel_fungi &!grepl("p_Chordata",tax_data[,"taxLineage"])  & tax_data[,"taxRank"] == 'S'
+sel_bacteria <- grepl("d_Bacteria",  tax_data[,"taxLineage"]) & tax_data[,"taxRank"] == 'S'
+sel_viruses  <- grepl("d_Viruses",   tax_data[,"taxLineage"]) & tax_data[,"taxRank"] == 'S'
+sel_fungi    <- grepl("k_Fungi",     tax_data[,"taxLineage"]) & tax_data[,"taxRank"] == 'S'
+sel_euk      <- grepl("d_Eukaryota", tax_data[,"taxLineage"]) & tax_data[,"taxRank"] == 'S'
+sel_protists <- grepl("d_Eukaryota", tax_data[,"taxLineage"]) & !sel_fungi &
+                !grepl("p_Chordata", tax_data[,"taxLineage"]) & tax_data[,"taxRank"] == 'S'
 
-my_df <- data.frame(Name=tax_data$name,Max=apply(cladeReads,1,max,na.rm=TRUE),cladeReads,Lineage=pavian:::beautify_taxLineage(tax_data$taxLineage), stringsAsFactors = FALSE)
+my_df <- data.frame(
+  Name    = tax_data$name,
+  Max     = apply(cladeReads, 1, max, na.rm = TRUE),
+  cladeReads,
+  Lineage = pavian:::beautify_taxLineage(tax_data$taxLineage),
+  stringsAsFactors = FALSE
+)
 my_dt <- function(sel) {
   selw <- which(sel)
-  max_order <- order(my_df[sel,"Max"], decreasing = TRUE)
+  max_order <- order(my_df[sel, "Max"], decreasing = TRUE)
   if (sum(sel) > 100) {
     selw <- selw[max_order[1:100]]
-    h = sprintf("Showing %s of %s species.", 100, sum(sel))
+    h <- sprintf("Showing top 100 of %s species.", sum(sel))
   } else {
-    selw <- selw[max_order]
-    h = ""
+    selw <- selw[max_order]; h <- ""
   }
   shiny::tagList(
     shiny::HTML(h),
-    DT::datatable(my_df[selw,,drop=F],height = "600px", rownames = FALSE,
-              class = "stripe hover row-border compact nowrap", extensions = 'Buttons',  options = list( dom = 'Bfrtip', buttons = pavian:::common_buttons(set_name), scrollX = TRUE))
+    DT::datatable(my_df[selw,, drop = FALSE], height = "600px", rownames = FALSE,
+                  class = "stripe hover row-border compact nowrap",
+                  extensions = 'Buttons',
+                  options = list(dom = 'Bfrtip',
+                                 buttons = pavian:::common_buttons(set_name),
+                                 scrollX = TRUE))
   )
 }
+
 tabsetPanel(
-  tabPanel("Bacteria", my_dt(sel_bacteria)),
-  tabPanel("Viruses", my_dt(sel_viruses)),
-  tabPanel("Eukaryotes", my_dt(sel_euk)),
-  tabPanel("Eukaryotes/Fungi", my_dt(sel_fungi)),
-  tabPanel("Eukaryotes/Protists", my_dt(sel_protists))
+  tabPanel("Bacteria",            my_dt(sel_bacteria)),
+  tabPanel("Viruses",             my_dt(sel_viruses)),
+  tabPanel("Eukaryotes",          my_dt(sel_euk)),
+  tabPanel("Eukaryotes / Fungi",  my_dt(sel_fungi)),
+  tabPanel("Eukaryotes / Protists", my_dt(sel_protists))
 )
-#,tabPanel("Clade percentage",
-#           DT::datatable(data.frame(tax_data[,1:3],100*signif(sweep(cladeReads,2,colSums(cladeReads[1:2,],na.rm=T),"/"),4),tax_data[4]),
-#             class = "stripe hover row-border compact nowrap",
-#              extensions = 'Buttons', 
-#              options = list( dom = 'Bfrtip', buttons = pavian:::common_buttons(set_name), scrollX = TRUE)))
-#)
 ```
 
+## Top hits per sample
 
-```{r, eval=FALSE}
-tax_taxRanks <- c("D","K","P","C","O","F","G","S")
+Top 10 species with ≥ 50 clade reads, after removing Chordata and synthetic constructs.
 
-do.call(tabsetPanel,lapply(names(reports), function(n) {
-  my_report <- reports[[n]]
+```{r top_hits}
+top_n     <- 10
+min_reads <- 50
 
-  tabPanel(n, 
-           DT::datatable(my_report,
-              class = "stripe hover row-border compact nowrap",
-              extensions = 'Buttons', 
-              options = list( dom = 'Bfrtip', buttons = pavian:::common_buttons(set_name)))
-           )
+do.call(tabsetPanel, lapply(names(reports), function(n) {
+  r <- reports[[n]]
+  r <- r[r$taxRank == "S" & r$cladeReads >= min_reads, , drop = FALSE]
+  r <- r[!grepl("Chordata|synthetic", r$taxLineage), , drop = FALSE]
+  r <- r[order(-r$cladeReads), , drop = FALSE]
+  r <- utils::head(r, top_n)
+  tabPanel(n,
+    if (nrow(r) == 0)
+      HTML("<i>No species above threshold.</i>")
+    else
+      DT::datatable(
+        data.frame(
+          Species    = sub("^._", "", r$name),
+          CladeReads = r$cladeReads,
+          TaxonReads = r$taxonReads,
+          Lineage    = pavian:::beautify_taxLineage(r$taxLineage),
+          stringsAsFactors = FALSE
+        ),
+        rownames = FALSE,
+        options  = list(dom = "t", pageLength = top_n)
+      )
+  )
 }))
 ```
 
+## Cross-sample heatmap
+
+Top 40 microbial species across all samples (log10 of clade reads).
+
+```{r heatmap, fig.width=10, fig.height=8}
+tryCatch({
+  sel_microbe <- sel_bacteria | sel_viruses | sel_fungi
+  mat <- as.matrix(cladeReads[sel_microbe, , drop = FALSE])
+  rownames(mat) <- sub("^._", "", tax_data$name[sel_microbe])
+
+  # Replace NA/NaN/Inf with 0
+  mat[!is.finite(mat)] <- 0
+
+  # Drop rows/cols that are entirely zero (clustering can't handle them)
+  mat <- mat[rowSums(mat) > 0, , drop = FALSE]
+  mat <- mat[, colSums(mat) > 0, drop = FALSE]
+
+  # Keep top 40 by max abundance
+  mat <- mat[order(-apply(mat, 1, max)), , drop = FALSE]
+  mat <- mat[seq_len(min(40, nrow(mat))), , drop = FALSE]
+
+  # Need at least 2 rows AND 2 cols for clustering
+  do_cluster_rows <- nrow(mat) >= 2
+  do_cluster_cols <- ncol(mat) >= 2
+
+  if (nrow(mat) < 1 || ncol(mat) < 1) {
+    cat("*(No non-zero microbial abundance to plot.)*")
+  } else {
+    pheatmap::pheatmap(
+      log10(mat + 1),
+      color        = colorRampPalette(c("white","#a8c8ec","#1f4e79"))(50),
+      cluster_rows = do_cluster_rows,
+      cluster_cols = do_cluster_cols,
+      fontsize_row = 8,
+      fontsize_col = 9,
+      main         = "log10(clade reads + 1) — top microbes"
+    )
+  }
+}, error = function(e) {
+  cat("*(Heatmap not rendered:", conditionMessage(e), ")*")
+})
+```
+
+## Prevalence-based contaminant flagging
+
+Species detected in *all* samples at low level may be reagent/lab contaminants; species exclusive to a single sample are more likely real.
+
+```{r contam_flag}
+tryCatch({
+  sel_microbe <- sel_bacteria | sel_viruses | sel_fungi
+  m <- as.matrix(cladeReads[sel_microbe, , drop = FALSE])
+  rownames(m) <- sub("^._", "", tax_data$name[sel_microbe])
+  prevalence <- rowSums(m > 10, na.rm = TRUE)
+  max_reads  <- apply(m, 1, max, na.rm = TRUE)
+  flagged <- data.frame(
+    Species    = rownames(m),
+    Prevalence = prevalence,
+    MaxReads   = max_reads,
+    Pattern = ifelse(
+      prevalence == ncol(m) & max_reads < 1000, "Likely contaminant",
+      ifelse(prevalence == 1 & max_reads >= 100, "Sample-specific", "")
+    ),
+    stringsAsFactors = FALSE
+  )
+  flagged <- flagged[flagged$Pattern != "", , drop = FALSE]
+  flagged <- flagged[order(flagged$Pattern, -flagged$MaxReads), , drop = FALSE]
+  DT::datatable(flagged, rownames = FALSE,
+                options = list(pageLength = 20, dom = 'Bfrtip',
+                               buttons = pavian:::common_buttons(set_name)),
+                extensions = 'Buttons')
+}, error = function(e) {
+  cat("*(Contaminant flagging skipped:", conditionMessage(e), ")*")
+})
+```
+
+Sankey visualization
+=====================================  
 
 ```{r sankey_vis}
-###############SANKEYS
 if (isTRUE(params$include_sankey)) {
-tax_taxRanks <- c("D","K","P","C","O","F","G","S")
 
-all_names <- sub("^._","",sort(unique(unlist(sapply(reports,function(x) x$name[x$taxRank != "-"])))))
-colourScale <- sankeyD3::JS(sprintf("d3.scaleOrdinal().range(d3.schemeCategory20b).domain([%s])",
-                                     paste0('"',c(all_names,"other"),'"',collapse=",")))
+  tax_taxRanks <- c("D","K","P","C","O","F","G","S")
 
+  all_names <- sub("^._", "", sort(unique(unlist(
+    sapply(reports, function(x) x$name[x$taxRank != "-"])
+  ))))
+  # Sanitize for JS string injection
+  all_names <- gsub('"', "'", all_names, fixed = TRUE)
+  all_names <- gsub("\\\\", "/", all_names)
 
-# library(bsplus)
-# ac <- bsplus::bs_accordion_sidebar("sankey")
-# for (n in names(reports)) {
-#   my_report <- reports[[n]]
-#   my_report2 <- filter_taxon(my_report, "Chordata")
-#   my_report2 <- filter_taxon(my_report2, "synthetic construct")
-#  
-#   ac <- ac %>% bs_append(title_side=n,content_side="",content_main=pavian:::build_sankey_network(my_report2, nodePadding=13, xScalingFactor=.9, nodeStrokeWidth=0, zoom = FALSE, colourScale = colourScale) )
-# }
-# 
+  # Explicit 20-color palette (category20b colors) — independent of D3 version
+  palette <- c(
+    "#393b79","#5254a3","#6b6ecf","#9c9ede",
+    "#637939","#8ca252","#b5cf6b","#cedb9c",
+    "#8c6d31","#bd9e39","#e7ba52","#e7cb94",
+    "#843c39","#ad494a","#d6616b","#e7969c",
+    "#7b4173","#a55194","#ce6dbd","#de9ed6"
+  )
+  colourScale <- sankeyD3::JS(sprintf(
+    "d3.scaleOrdinal().range([%s]).domain([%s])",
+    paste0('"', palette,                 '"', collapse = ","),
+    paste0('"', c(all_names, "other"),   '"', collapse = ",")
+  ))
 
-#library(D3partitionR)
+  if (length(params$filter_tax) != 0 && isTRUE(is.na(params$filter_tax))) {
+    filt <- c("Chordata", "other sequences")
+  } else {
+    filt <- params$filter_taxa
+  }
 
-if (length(params$filter_tax) != 0 && isTRUE(is.na(params$filter_tax))) {
-  filt <- c("Chordata", "other sequences")
-} else {
-  filt <- params$filter_taxa
-}
-
-
-htmltools::tagList(
-  h1("Sankey visualization"),
-  HTML(sprintf("<script>sankey_colorscale = %s</script>", colourScale)),
-  lapply(names(reports), function(n) {
-#  n="PT1"
-  my_report <- reports[[n]]
-
-  for (f in filt)
-    my_report <- filter_taxon(my_report, f)
-  
-  # for D3partitionR
-  # my_report2 <- my_report2[my_report2$cladeReads > 0 & my_report2$taxonReads > 0 & grepl("^._root",my_report2$taxLineage), ]
-  #path_in <- lapply(strsplit(gsub("._","",my_report2$taxLineage),"|",fixed=T), as.list)
-  #value_in <- my_report2$taxonReads
-  #D3partitionR(data=list(path=path_in,value=value_in), title=list(text=n), trail=TRUE)
+  # Sankey navigation TOC
+  toc_html <- paste0(
+    "<p><b>Jump to:</b> ",
+    paste(sprintf("<a href='#sankey-%s'>%s</a>",
+                  gsub("[^A-Za-z0-9_-]", "_", names(reports)),
+                  names(reports)),
+          collapse = " &middot; "),
+    "</p>"
+  )
 
   htmltools::tagList(
-  #  br(),
-    h2(n),
-  #  tabsetPanel(
-  #    tabPanel("Sankey visualization",
-               
-        pavian:::build_sankey_network(my_report, nodePadding=13, xScalingFactor=.9, nodeStrokeWidth=0, zoom = FALSE, colourScale = "sankey_colorscale", LinkGroup = "source_name")
-        
-  #    )#,
-      #tabPanel("All data",
-      #         DT::datatable(my_report,
-      #        class = "stripe hover row-border compact nowrap",
-      #        extensions = 'Buttons', 
-      #        options = list( dom = 'Bfrtip', buttons = pavian:::common_buttons(set_name))))
-  #  )
+    HTML(toc_html),
+
+    HTML(
+      "<div style='border:1px solid #ddd; padding:8px 12px; background:#fafafa;
+                  font-size:90%; margin-bottom:1em; border-radius:4px;'>
+         <b>How to read the Sankey:</b> node width is proportional to clade reads;
+         node color is assigned consistently per taxon across samples;
+         link color follows the source node. Filtered taxa appear in the run
+         information section above.
+       </div>"
+    ),
+
+    # Shim for missing Shiny + color scale + post-render colorizer
+    HTML(sprintf(
+      "<script>
+         if (typeof Shiny === 'undefined') {
+           window.Shiny = { onInputChange:function(){}, setInputValue:function(){},
+                            addCustomMessageHandler:function(){}, bindAll:function(){},
+                            unbindAll:function(){} };
+         }
+         sankey_colorscale = %s;
+
+         function pavianRecolor() {
+           if (typeof sankey_colorscale !== 'function') return;
+           document.querySelectorAll('.node').forEach(function(node) {
+             var rect = node.querySelector('rect');
+             var text = node.querySelector('text');
+             if (!rect || !text) return;
+             var name = text.textContent.trim();
+             var c = sankey_colorscale(name);
+             rect.setAttribute('fill', c);
+             rect.style.fill = c;
+           });
+           document.querySelectorAll('.link').forEach(function(link) {
+             var cls = (link.getAttribute('class') || '')
+                         .split(/\\s+/).filter(function(x){ return x && x !== 'link'; });
+             if (cls.length) {
+               var c = sankey_colorscale(cls[0]);
+               link.style.stroke = c;
+               link.style.strokeOpacity = 0.4;
+             }
+           });
+         }
+         window.addEventListener('load', function(){ setTimeout(pavianRecolor, 300); });
+         setTimeout(pavianRecolor, 1500);
+         setTimeout(pavianRecolor, 3000);
+       </script>",
+      colourScale
+    )),
+
+    lapply(names(reports), function(n) {
+      my_report <- reports[[n]]
+      for (f in filt) my_report <- filter_taxon(my_report, f)
+      anchor <- gsub("[^A-Za-z0-9_-]", "_", n)
+      htmltools::tagList(
+        HTML(sprintf("<h2 id='sankey-%s'>%s</h2>", anchor, n)),
+        pavian:::build_sankey_network(
+          my_report,
+          nodePadding     = 13,
+          xScalingFactor  = .9,
+          nodeStrokeWidth = 0,
+          zoom            = FALSE,
+          colourScale     = "sankey_colorscale",
+          LinkGroup       = "source_name"
+        )
+      )
+    })
   )
-}))
 }
 ```
 
 About
 =====
-This file was generated with the Pavian R package version `r utils::packageVersion('pavian')` on `r date()`. Please cite Pavian if you use it in your research.
+
+This file was generated with the Pavian R package version `r utils::packageVersion('pavian')` on `r date()`.
+Please cite Pavian if you use it in your research.
+
+<details><summary>Software environment</summary>
+<pre>
+```{r session, echo=FALSE, results='asis'}
+cat(paste(capture.output(sessionInfo()), collapse = "\n"))
+```
+</pre>
+</details>
