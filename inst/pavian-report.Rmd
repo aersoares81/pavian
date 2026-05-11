@@ -119,7 +119,7 @@ tabsetPanel(
 )
 ```
 
-## Read-fate overview
+## Read assignment overview
 
 ```{r qc_plot, fig.width=9, fig.height=4.5}
 tryCatch({
